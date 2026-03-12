@@ -1,0 +1,17 @@
+services:
+  tabbit2api:
+    build: .
+    container_name: tabbit2api
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8800}:8800"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8800/v1/models')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

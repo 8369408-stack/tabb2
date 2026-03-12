@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="zh" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tabbit2API 管理面板</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        border: 'hsl(240 3.7% 15.9%)',
+        input: 'hsl(240 3.7% 15.9%)',
+        ring: 'hsl(240 4.9% 83.9%)',
+        background: 'hsl(240 10% 3.9%)',
+        foreground: 'hsl(0 0% 98%)',
+        primary: { DEFAULT: 'hsl(0 0% 98%)', foreground: 'hsl(240 5.9% 10%)' },
+        muted: { DEFAULT: 'hsl(240 3.7% 15.9%)', foreground: 'hsl(240 5% 64.9%)' },
+        accent: { DEFAULT: 'hsl(240 3.7% 15.9%)', foreground: 'hsl(0 0% 98%)' },
+        destructive: { DEFAULT: 'hsl(0 62.8% 30.6%)', foreground: 'hsl(0 0% 98%)' },
+        card: { DEFAULT: 'hsl(240 10% 3.9%)', foreground: 'hsl(0 0% 98%)' },
+      }
+    }
+  }
+}
+</script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .status-active { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+  .status-error { background: #ef4444; box-shadow: 0 0 6px #ef444488; }
+  .status-unknown { background: #71717a; }
+  .status-cooldown { background: #eab308; box-shadow: 0 0 6px #eab30888; }
+  .fade-in { animation: fadeIn .2s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 0 2px hsl(240 4.9% 83.9% / 0.3); }
+  .nav-item { transition: background .15s, color .15s; }
+  .nav-item:hover { background: hsl(240 3.7% 15.9%); }
+  .nav-item.active { background: hsl(240 3.7% 15.9%); color: hsl(0 0% 98%); }
+</style>
+</head>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen">
+
+<div id="app"></div>
+
+<script>
+const API = '/api/admin';
+let token = localStorage.getItem('admin_token') || '';
+let currentPage = 'dashboard';
+let autoRefreshTimer = null;
+
+// ── Fetch helpers ──
+
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...opts.headers };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(API + path, { ...opts, headers });
+  if (res.status === 401) {
+    token = '';
+    localStorage.removeItem('admin_token');
+    render();
+    throw new Error('unauthorized');
+  }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'request failed');
+  return data;
+}
+
+// ── Router ──
+
+function navigate(page) {
+  currentPage = page;
+  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  render();
+}
+
+function render() {
+  const app = document.getElementById('app');
+  if (!token) { app.innerHTML = loginPage(); bindLogin(); return; }
+  app.innerHTML = layout();
+  bindNav();
+  loadPage();
+}
+
+// ── Login ──
+
+function loginPage() {
+  return `
+  <div class="min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-sm">
+      <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-8 shadow-2xl fade-in">
+        <div class="text-center mb-8">
+          <div class="inline-flex items-center justify-center w-12 h-12 rounded-lg bg-zinc-800 mb-4">
+            <svg class="w-6 h-6 text-zinc-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          </div>
+          <h1 class="text-xl font-semibold">Tabbit2API</h1>
+          <p class="text-sm text-zinc-400 mt-1">管理面板登录</p>
+        </div>
+        <form id="loginForm" class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-zinc-400 mb-1.5">密码</label>
+            <input id="loginPwd" type="password" placeholder="输入管理密码" autocomplete="current-password"
+              class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:border-zinc-600">
+          </div>
+          <button type="submit" class="w-full rounded-lg bg-zinc-100 px-4 py-2.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200 transition-colors">
+            登录
+          </button>
+          <p id="loginErr" class="text-sm text-red-400 text-center hidden"></p>
+        </form>
+      </div>
+    </div>
+  </div>`;
+}
+
+function bindLogin() {
+  document.getElementById('loginForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const pwd = document.getElementById('loginPwd').value;
+    const errEl = document.getElementById('loginErr');
+    try {
+      const data = await fetch(API + '/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pwd })
+      }).then(r => r.json());
+      if (data.token) {
+        token = data.token;
+        localStorage.setItem('admin_token', token);
+        currentPage = 'dashboard';
+        render();
+      } else {
+        errEl.textContent = data.detail || '登录失败';
+        errEl.classList.remove('hidden');
+      }
+    } catch {
+      errEl.textContent = '连接失败';
+      errEl.classList.remove('hidden');
+    }
+  };
+}
+
+// ── Layout ──
+
+const navItems = [
+  { id: 'dashboard', label: 'Dashboard', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>' },
+  { id: 'tokens', label: 'Tokens', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>' },
+  { id: 'settings', label: 'Settings', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>' },
+  { id: 'logs', label: 'Logs', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/>' },
+];
+
+function layout() {
+  return `
+  <div class="flex min-h-screen">
+    <!-- Sidebar -->
+    <aside class="w-56 border-r border-zinc-800 bg-zinc-950 flex flex-col fixed h-screen">
+      <div class="p-5 border-b border-zinc-800">
+        <h1 class="text-base font-semibold tracking-tight">Tabbit2API</h1>
+        <p class="text-xs text-zinc-500 mt-0.5">管理面板</p>
+      </div>
+      <nav class="flex-1 p-3 space-y-1" id="navList">
+        ${navItems.map(n => `
+          <button data-page="${n.id}" class="nav-item w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm ${currentPage === n.id ? 'active' : 'text-zinc-400'}">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">${n.icon}</svg>
+            ${n.label}
+          </button>
+        `).join('')}
+      </nav>
+      <div class="p-3 border-t border-zinc-800">
+        <button onclick="logout()" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-zinc-400 hover:bg-zinc-900 hover:text-zinc-300 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+          退出登录
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="flex-1 ml-56 p-8" id="mainContent">
+      <div class="max-w-6xl mx-auto fade-in" id="pageContent"></div>
+    </main>
+  </div>`;
+}
+
+function bindNav() {
+  document.querySelectorAll('#navList button').forEach(btn => {
+    btn.onclick = () => navigate(btn.dataset.page);
+  });
+}
+
+function logout() {
+  token = '';
+  localStorage.removeItem('admin_token');
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  render();
+}
+
+// ── Pages ──
+
+async function loadPage() {
+  const el = document.getElementById('pageContent');
+  try {
+    switch (currentPage) {
+      case 'dashboard': await renderDashboard(el); break;
+      case 'tokens': await renderTokens(el); break;
+      case 'settings': await renderSettings(el); break;
+      case 'logs': await renderLogs(el); break;
+    }
+  } catch (e) {
+    el.innerHTML = `<div class="text-red-400">加载失败: ${e.message}</div>`;
+  }
+}
+
+// ── Dashboard ──
+
+async function renderDashboard(el) {
+  const s = await api('/status');
+  el.innerHTML = `
+    <h2 class="text-2xl font-semibold mb-6">Dashboard</h2>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+      ${statCard('总请求', s.total_requests, 'text-zinc-100')}
+      ${statCard('成功', s.total_success, 'text-emerald-400')}
+      ${statCard('失败', s.total_errors, 'text-red-400')}
+      ${statCard('成功率', s.success_rate + '%', 'text-blue-400')}
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-8">
+      ${miniCard('Token 总数', s.total_tokens)}
+      ${miniCard('活跃 Token', s.active_tokens)}
+    </div>
+    <div class="rounded-xl border border-zinc-800 bg-zinc-900">
+      <div class="px-5 py-4 border-b border-zinc-800">
+        <h3 class="text-sm font-medium">最近请求</h3>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead><tr class="text-zinc-400 text-left border-b border-zinc-800">
+            <th class="px-5 py-3 font-medium">时间</th>
+            <th class="px-5 py-3 font-medium">模型</th>
+            <th class="px-5 py-3 font-medium">Token</th>
+            <th class="px-5 py-3 font-medium">状态</th>
+            <th class="px-5 py-3 font-medium">耗时</th>
+          </tr></thead>
+          <tbody>
+            ${s.recent_logs.map(l => `<tr class="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+              <td class="px-5 py-3 text-zinc-400">${fmtTime(l.timestamp)}</td>
+              <td class="px-5 py-3">${l.model}</td>
+              <td class="px-5 py-3 text-zinc-400">${l.token_name}</td>
+              <td class="px-5 py-3">${statusBadge(l.status)}</td>
+              <td class="px-5 py-3 text-zinc-400">${l.duration}s</td>
+            </tr>`).join('') || '<tr><td colspan="5" class="px-5 py-8 text-center text-zinc-500">暂无请求记录</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function statCard(label, value, colorClass) {
+  return `
+  <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+    <p class="text-sm text-zinc-400 mb-1">${label}</p>
+    <p class="text-2xl font-semibold ${colorClass}">${value}</p>
+  </div>`;
+}
+
+function miniCard(label, value) {
+  return `
+  <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-5 flex items-center justify-between">
+    <span class="text-sm text-zinc-400">${label}</span>
+    <span class="text-lg font-semibold">${value}</span>
+  </div>`;
+}
+
+// ── Tokens ──
+
+async function renderTokens(el) {
+  const data = await api('/tokens');
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-6">
+      <h2 class="text-2xl font-semibold">Tokens</h2>
+      <div class="flex items-center gap-2">
+        <button onclick="showGoogleLogin()" class="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800 transition-colors">
+          <svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+          Google 登录获取
+        </button>
+        <button onclick="showAddToken()" class="inline-flex items-center gap-2 rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900 hover:bg-zinc-200 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          手动添加
+        </button>
+      </div>
+    </div>
+    <div id="tokenModal"></div>
+    <div class="rounded-xl border border-zinc-800 bg-zinc-900">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead><tr class="text-zinc-400 text-left border-b border-zinc-800">
+            <th class="px-5 py-3 font-medium">状态</th>
+            <th class="px-5 py-3 font-medium">名称</th>
+            <th class="px-5 py-3 font-medium">Token</th>
+            <th class="px-5 py-3 font-medium">请求数</th>
+            <th class="px-5 py-3 font-medium">错误</th>
+            <th class="px-5 py-3 font-medium">最后使用</th>
+            <th class="px-5 py-3 font-medium text-right">操作</th>
+          </tr></thead>
+          <tbody>
+            ${data.tokens.map(t => `<tr class="border-b border-zinc-800/50 hover:bg-zinc-800/30" data-id="${t.id}">
+              <td class="px-5 py-3"><span class="status-dot status-${t.status}"></span></td>
+              <td class="px-5 py-3 font-medium">${esc(t.name)}</td>
+              <td class="px-5 py-3 text-zinc-400 font-mono text-xs">${esc(t.value_preview)}</td>
+              <td class="px-5 py-3">${t.total_requests}</td>
+              <td class="px-5 py-3 ${t.error_count > 0 ? 'text-red-400' : ''}">${t.error_count}</td>
+              <td class="px-5 py-3 text-zinc-400">${t.last_used_at ? fmtTime(t.last_used_at) : '-'}</td>
+              <td class="px-5 py-3 text-right space-x-1">
+                <button onclick="testToken('${t.id}')" class="inline-flex items-center rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs hover:bg-zinc-700 transition-colors" title="测试">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                </button>
+                <button onclick="toggleToken('${t.id}', ${!t.enabled})" class="inline-flex items-center rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs hover:bg-zinc-700 transition-colors" title="${t.enabled ? '禁用' : '启用'}">
+                  ${t.enabled
+                    ? '<svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>'
+                    : '<svg class="w-3.5 h-3.5 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21"/></svg>'
+                  }
+                </button>
+                <button onclick="deleteToken('${t.id}','${esc(t.name)}')" class="inline-flex items-center rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs hover:bg-red-900/50 text-red-400 transition-colors" title="删除">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                </button>
+              </td>
+            </tr>`).join('') || '<tr><td colspan="7" class="px-5 py-8 text-center text-zinc-500">尚未添加 Token</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function showAddToken() {
+  document.getElementById('tokenModal').innerHTML = `
+  <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onclick="if(event.target===this)closeModal()">
+    <div class="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl fade-in">
+      <h3 class="text-lg font-semibold mb-4">添加 Token</h3>
+      <form id="addTokenForm" class="space-y-4">
+        <div>
+          <label class="block text-sm text-zinc-400 mb-1.5">名称</label>
+          <input id="tkName" type="text" placeholder="例如: Account 1" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500">
+        </div>
+        <div>
+          <label class="block text-sm text-zinc-400 mb-1.5">Token 值</label>
+          <textarea id="tkValue" rows="3" placeholder="JWT|NEXT_AUTH|DEVICE_ID" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 resize-none"></textarea>
+          <p class="text-xs text-zinc-500 mt-1">格式: JWT 或 JWT|NEXT_AUTH 或 JWT|NEXT_AUTH|DEVICE_ID</p>
+        </div>
+        <div class="flex justify-end gap-3 pt-2">
+          <button type="button" onclick="closeModal()" class="rounded-lg border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800 transition-colors">取消</button>
+          <button type="submit" class="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900 hover:bg-zinc-200 transition-colors">添加</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+  document.getElementById('addTokenForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const name = document.getElementById('tkName').value.trim();
+    const value = document.getElementById('tkValue').value.trim();
+    if (!name || !value) return;
+    await api('/tokens', { method: 'POST', body: JSON.stringify({ name, value }) });
+    closeModal();
+    renderTokens(document.getElementById('pageContent'));
+  };
+}
+
+function closeModal() {
+  document.getElementById('tokenModal').innerHTML = '';
+}
+
+// ── Google 登录获取 Token ──
+
+const GOOGLE_CLIENT_ID = '448526856882-gks4gsvgspqkcdt8jsql5b5en0mk3v15.apps.googleusercontent.com';
+const TABBIT_ORIGIN = 'https://web.tabbitbrowser.com';
+
+function showGoogleLogin() {
+  document.getElementById('tokenModal').innerHTML = `
+  <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onclick="if(event.target===this)closeModal()">
+    <div class="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl fade-in">
+      <h3 class="text-lg font-semibold mb-2">Google 登录获取 Token</h3>
+      <p class="text-sm text-zinc-400 mb-4">通过 Google 账号登录 Tabbit，自动获取可用的 Token。</p>
+      <div id="glStep1">
+        <div class="space-y-3">
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">Token 名称</label>
+            <input id="glName" type="text" placeholder="例如: Google Account 1" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500">
+          </div>
+          <div class="rounded-lg bg-blue-950/40 border border-blue-900/50 p-3">
+            <p class="text-xs text-blue-300 font-medium mb-1.5">操作步骤</p>
+            <ol class="text-xs text-zinc-400 space-y-1 list-decimal list-inside">
+              <li>点击下方按钮，弹出 Google 登录窗口</li>
+              <li>在弹窗中 <b class="text-zinc-300">先按 F12</b> 打开开发者工具，切到 <b class="text-zinc-300">Network</b> 标签</li>
+              <li>选择 Google 账号完成登录</li>
+              <li>在 Network 中找到 <code class="text-blue-300">transform</code> 请求，点开 → <b class="text-zinc-300">Payload</b> → 复制 <code class="text-blue-300">id_token</code> 的值</li>
+              <li>粘贴到下方输入框，点提交</li>
+            </ol>
+          </div>
+          <button onclick="openGoogleOAuth()" class="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-zinc-100 px-4 py-2.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200 transition-colors">
+            <svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+            打开 Google 登录
+          </button>
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">粘贴 id_token</label>
+            <textarea id="glManualToken" rows="4" placeholder="eyJhbGciOiJSUzI1NiIs..." class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 font-mono resize-none"></textarea>
+          </div>
+          <button onclick="submitGoogleIdToken()" class="w-full rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-600 transition-colors">提交并获取 Token</button>
+        </div>
+      </div>
+      <div id="glResult" style="display:none"></div>
+      <div class="flex justify-end pt-4 mt-4 border-t border-zinc-800">
+        <button onclick="closeModal()" class="rounded-lg border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800 transition-colors">关闭</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function openGoogleOAuth() {
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: 'openid email profile',
+    response_type: 'id_token',
+    redirect_uri: 'gis_transform',
+    response_mode: 'form_post',
+    origin: TABBIT_ORIGIN,
+    display: 'popup',
+    prompt: 'select_account',
+    gsiwebsdk: 'gis_attributes',
+  });
+  window.open(
+    'https://accounts.google.com/o/oauth2/v2/auth?' + params,
+    'google_login',
+    'width=520,height=700,left=200,top=80'
+  );
+}
+
+function submitGoogleIdToken() {
+  const val = document.getElementById('glManualToken').value.trim();
+  if (!val) return alert('请先粘贴 id_token');
+  exchangeGoogleToken(val);
+}
+
+async function exchangeGoogleToken(id_token) {
+  const step1 = document.getElementById('glStep1');
+  const result = document.getElementById('glResult');
+  step1.innerHTML = '<div class="flex items-center gap-3 py-6"><svg class="w-5 h-5 animate-spin text-zinc-400" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg><span class="text-sm text-zinc-300">正在换取 Tabbit Token...</span></div>';
+
+  try {
+    const data = await api('/tokens/google-login', {
+      method: 'POST',
+      body: JSON.stringify({ id_token })
+    });
+
+    step1.style.display = 'none';
+    result.style.display = 'block';
+
+    const name = (document.getElementById('glName') ? document.getElementById('glName').value.trim() : '') || 'Google Account';
+
+    result.innerHTML = `
+      <div class="rounded-lg bg-emerald-900/30 border border-emerald-800/50 p-4 mb-3">
+        <p class="text-sm text-emerald-400 font-medium mb-1">Token 获取成功!</p>
+        <p class="text-xs text-zinc-400 font-mono break-all">${esc(data.token_value).substring(0, 60)}...</p>
+      </div>
+      <button onclick="saveGoogleToken('${esc(name)}', '${esc(data.token_value)}')" class="w-full rounded-lg bg-zinc-100 px-4 py-2.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200 transition-colors">
+        保存为 "${esc(name)}"
+      </button>`;
+  } catch (e) {
+    step1.style.display = 'none';
+    result.style.display = 'block';
+    result.innerHTML = `<div class="rounded-lg bg-red-900/30 border border-red-800/50 p-4"><p class="text-sm text-red-400">${esc(e.message)}</p></div>`;
+  }
+}
+
+async function saveGoogleToken(name, value) {
+  try {
+    await api('/tokens', { method: 'POST', body: JSON.stringify({ name, value }) });
+    closeModal();
+    renderTokens(document.getElementById('pageContent'));
+  } catch (e) {
+    alert('保存失败: ' + e.message);
+  }
+}
+
+async function testToken(id) {
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>';
+  try {
+    const res = await api(`/tokens/${id}/test`, { method: 'POST' });
+    alert(res.ok ? '连接成功!' : `测试失败: ${res.error}`);
+  } catch (e) {
+    alert('测试失败: ' + e.message);
+  }
+  renderTokens(document.getElementById('pageContent'));
+}
+
+async function toggleToken(id, enabled) {
+  await api(`/tokens/${id}`, { method: 'PUT', body: JSON.stringify({ enabled }) });
+  renderTokens(document.getElementById('pageContent'));
+}
+
+async function deleteToken(id, name) {
+  if (!confirm(`确定删除 Token "${name}"?`)) return;
+  await api(`/tokens/${id}`, { method: 'DELETE' });
+  renderTokens(document.getElementById('pageContent'));
+}
+
+// ── Settings ──
+
+async function renderSettings(el) {
+  const s = await api('/settings');
+  el.innerHTML = `
+    <h2 class="text-2xl font-semibold mb-6">Settings</h2>
+    <div class="space-y-6">
+      <!-- Server -->
+      <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <h3 class="text-sm font-medium text-zinc-300 mb-4">服务器配置</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">Host</label>
+            <input id="sHost" type="text" value="${esc(s.server.host)}" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+          </div>
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">Port</label>
+            <input id="sPort" type="number" value="${s.server.port}" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+          </div>
+        </div>
+      </div>
+      <!-- Tabbit -->
+      <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <h3 class="text-sm font-medium text-zinc-300 mb-4">Tabbit 配置</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">Base URL</label>
+            <input id="sBaseUrl" type="text" value="${esc(s.tabbit.base_url)}" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+          </div>
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">Client ID</label>
+            <input id="sClientId" type="text" value="${esc(s.tabbit.client_id)}" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+          </div>
+        </div>
+      </div>
+      <!-- Proxy -->
+      <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <h3 class="text-sm font-medium text-zinc-300 mb-4">代理配置</h3>
+        <div>
+          <label class="block text-sm text-zinc-400 mb-1.5">API Key（留空则不校验）</label>
+          <input id="sApiKey" type="text" value="${esc(s.proxy.api_key)}" placeholder="sk-..." class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500">
+        </div>
+      </div>
+      <!-- Claude -->
+      <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <h3 class="text-sm font-medium text-zinc-300 mb-4">Claude Code 配置</h3>
+        <div class="max-w-xs mb-4">
+          <label class="block text-sm text-zinc-400 mb-1.5">默认 Tabbit 模型</label>
+          <select id="sClaudeModel" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+            ${['best','gpt-5.2-chat','gpt-5.1-chat','gemini-3.1-pro','gemini-3-flash','gemini-2.5-flash','claude-sonnet-4.6','claude-haiku-4.5','glm-5','deepseek-v3.2','minimax-m2.5','kimi-k2.5','qwen3.5-plus','doubao-seed-1.8'].map(m =>
+              '<option value="' + m + '"' + (s.claude?.default_model === m ? ' selected' : '') + '>' + m + '</option>'
+            ).join('')}
+          </select>
+        </div>
+        <div class="rounded-lg bg-zinc-800/50 border border-zinc-700/50 p-4">
+          <p class="text-xs text-zinc-400 mb-2 font-medium">Claude Code 连接配置</p>
+          <code class="block text-xs text-emerald-400 bg-zinc-900 rounded-md p-3 whitespace-pre">ANTHROPIC_BASE_URL=http://localhost:${s.server.port}
+ANTHROPIC_API_KEY=${s.proxy.api_key || 'any-key-here'}</code>
+          <p class="text-xs text-zinc-500 mt-2">支持 /v1/messages 端点，兼容工具调用和 thinking 模式</p>
+        </div>
+      </div>
+      <!-- System Prompt Injection -->
+      <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <h3 class="text-sm font-medium text-zinc-300 mb-4">提示词注入</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">OpenAI 系统提示词 (/v1/chat/completions)</label>
+            <textarea id="sOpenaiPrompt" rows="3" placeholder="留空则不注入" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 resize-y">${esc(s.proxy.system_prompt || '')}</textarea>
+          </div>
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">Claude 系统提示词 (/v1/messages)</label>
+            <textarea id="sClaudePrompt" rows="3" placeholder="留空则不注入" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 resize-y">${esc(s.claude?.system_prompt || '')}</textarea>
+          </div>
+        </div>
+      </div>
+      <!-- Logging -->
+      <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <h3 class="text-sm font-medium text-zinc-300 mb-4">日志配置</h3>
+        <div class="max-w-xs">
+          <label class="block text-sm text-zinc-400 mb-1.5">最大日志条数</label>
+          <input id="sMaxEntries" type="number" value="${s.logging.max_entries}" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+        </div>
+      </div>
+      <div class="flex justify-end">
+        <button onclick="saveSettings()" class="rounded-lg bg-zinc-100 px-6 py-2.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200 transition-colors">保存设置</button>
+      </div>
+
+      <!-- Password -->
+      <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <h3 class="text-sm font-medium text-zinc-300 mb-4">修改密码</h3>
+        <div class="space-y-4 max-w-sm">
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">当前密码</label>
+            <input id="pwOld" type="password" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+          </div>
+          <div>
+            <label class="block text-sm text-zinc-400 mb-1.5">新密码</label>
+            <input id="pwNew" type="password" class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+          </div>
+          <button onclick="changePassword()" class="rounded-lg bg-zinc-800 border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-700 transition-colors">修改密码</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function saveSettings() {
+  try {
+    await api('/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        host: document.getElementById('sHost').value,
+        port: parseInt(document.getElementById('sPort').value),
+        base_url: document.getElementById('sBaseUrl').value,
+        client_id: document.getElementById('sClientId').value,
+        api_key: document.getElementById('sApiKey').value,
+        claude_default_model: document.getElementById('sClaudeModel').value,
+        openai_system_prompt: document.getElementById('sOpenaiPrompt').value,
+        claude_system_prompt: document.getElementById('sClaudePrompt').value,
+        max_entries: parseInt(document.getElementById('sMaxEntries').value),
+      })
+    });
+    alert('设置已保存（端口变更需重启生效）');
+  } catch (e) { alert('保存失败: ' + e.message); }
+}
+
+async function changePassword() {
+  const old_password = document.getElementById('pwOld').value;
+  const new_password = document.getElementById('pwNew').value;
+  if (!old_password || !new_password) return alert('请填写完整');
+  try {
+    await api('/password', { method: 'PUT', body: JSON.stringify({ old_password, new_password }) });
+    alert('密码已修改');
+    document.getElementById('pwOld').value = '';
+    document.getElementById('pwNew').value = '';
+  } catch (e) { alert('修改失败: ' + e.message); }
+}
+
+// ── Logs ──
+
+let logFilter = '';
+let logPage = 1;
+
+async function renderLogs(el) {
+  const params = new URLSearchParams({ page: logPage, page_size: 50 });
+  if (logFilter) params.set('status', logFilter);
+  const data = await api('/logs?' + params);
+  const totalPages = Math.max(1, Math.ceil(data.total / data.page_size));
+
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-6">
+      <h2 class="text-2xl font-semibold">Logs</h2>
+      <div class="flex items-center gap-3">
+        <select id="logFilterSel" onchange="filterLogs(this.value)" class="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100">
+          <option value="" ${!logFilter ? 'selected' : ''}>全部</option>
+          <option value="success" ${logFilter === 'success' ? 'selected' : ''}>成功</option>
+          <option value="error" ${logFilter === 'error' ? 'selected' : ''}>失败</option>
+        </select>
+        <label class="flex items-center gap-2 text-sm text-zinc-400">
+          <input type="checkbox" id="autoRefreshCb" onchange="toggleAutoRefresh(this.checked)" ${autoRefreshTimer ? 'checked' : ''}
+            class="rounded border-zinc-600 bg-zinc-800 text-zinc-100">
+          自动刷新
+        </label>
+      </div>
+    </div>
+    <div class="rounded-xl border border-zinc-800 bg-zinc-900">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead><tr class="text-zinc-400 text-left border-b border-zinc-800">
+            <th class="px-5 py-3 font-medium">时间</th>
+            <th class="px-5 py-3 font-medium">模型</th>
+            <th class="px-5 py-3 font-medium">Token</th>
+            <th class="px-5 py-3 font-medium">流式</th>
+            <th class="px-5 py-3 font-medium">状态</th>
+            <th class="px-5 py-3 font-medium">耗时</th>
+            <th class="px-5 py-3 font-medium">错误</th>
+          </tr></thead>
+          <tbody>
+            ${data.items.map(l => `<tr class="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+              <td class="px-5 py-3 text-zinc-400 whitespace-nowrap">${fmtTime(l.timestamp)}</td>
+              <td class="px-5 py-3">${esc(l.model)}</td>
+              <td class="px-5 py-3 text-zinc-400">${esc(l.token_name)}</td>
+              <td class="px-5 py-3">${l.stream ? '<span class="text-blue-400">SSE</span>' : 'JSON'}</td>
+              <td class="px-5 py-3">${statusBadge(l.status)}</td>
+              <td class="px-5 py-3 text-zinc-400">${l.duration}s</td>
+              <td class="px-5 py-3 text-red-400 text-xs max-w-xs truncate">${esc(l.error)}</td>
+            </tr>`).join('') || '<tr><td colspan="7" class="px-5 py-8 text-center text-zinc-500">暂无日志</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+      ${totalPages > 1 ? `
+      <div class="flex items-center justify-between px-5 py-3 border-t border-zinc-800">
+        <span class="text-sm text-zinc-400">共 ${data.total} 条</span>
+        <div class="flex items-center gap-2">
+          <button onclick="gotoLogPage(${logPage - 1})" ${logPage <= 1 ? 'disabled' : ''} class="rounded-md bg-zinc-800 px-3 py-1.5 text-xs hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">上一页</button>
+          <span class="text-sm text-zinc-400">${logPage} / ${totalPages}</span>
+          <button onclick="gotoLogPage(${logPage + 1})" ${logPage >= totalPages ? 'disabled' : ''} class="rounded-md bg-zinc-800 px-3 py-1.5 text-xs hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">下一页</button>
+        </div>
+      </div>` : ''}
+    </div>`;
+}
+
+function filterLogs(val) { logFilter = val; logPage = 1; renderLogs(document.getElementById('pageContent')); }
+function gotoLogPage(p) { logPage = p; renderLogs(document.getElementById('pageContent')); }
+function toggleAutoRefresh(on) {
+  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  if (on) {
+    autoRefreshTimer = setInterval(() => {
+      if (currentPage === 'logs') renderLogs(document.getElementById('pageContent'));
+    }, 5000);
+  }
+}
+
+// ── Helpers ──
+
+function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function fmtTime(ts) {
+  if (!ts) return '-';
+  try {
+    const d = new Date(ts);
+    return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch { return ts; }
+}
+
+function statusBadge(s) {
+  const colors = { success: 'bg-emerald-900/50 text-emerald-400', error: 'bg-red-900/50 text-red-400', pending: 'bg-zinc-800 text-zinc-400' };
+  return `<span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${colors[s] || colors.pending}">${s}</span>`;
+}
+
+// ── Init ──
+
+render();
+</script>
+</body>
+</html>
